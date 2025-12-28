@@ -1,5 +1,4 @@
 # AMR-Genotype-Phenotype-Agreement
-Rule-based analysis pipeline to quantify agreement between MIC susceptibility results and WGS resistance gene detection.
 # MIC ↔ WGS (ARG) Class-Level Agreement Analysis
 
 ## Overview
