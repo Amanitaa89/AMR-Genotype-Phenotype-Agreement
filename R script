@@ -1,0 +1,269 @@
+#!/usr/bin/env Rscript
+# ============================================================
+# MIC ↔ WGS (ARG) Class-Level Agreement Analysis
+# Author: (Your Name / Lab)
+# Purpose: Generate class-level genotype–phenotype agreement metrics
+# Inputs: CSV or Excel (one row per isolate; 0/1 phenotype + 0/1 genotype)
+# Outputs: auditable run folder with metrics, rulebook, confusion matrices
+# ============================================================
+
+suppressPackageStartupMessages({
+  if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+  if (!requireNamespace("readr", quietly = TRUE)) install.packages("readr")
+  if (!requireNamespace("tools", quietly = TRUE)) install.packages("tools")
+  library(dplyr)
+  library(readr)
+  library(tools)
+})
+
+# -----------------------------
+# 0) User settings (EDIT HERE)
+# -----------------------------
+# Input file path (CSV recommended)
+INPUT_FILE <- "~/Documents/Book10CorrelationE.csv"
+
+# ID column name in input file
+ID_COL <- "LIMS ID"
+
+# Output parent directory
+OUT_PARENT <- "~/Documents/MIC_WGS_Kappa_Output"
+
+# Definitions used:
+PHENO_DEF <- "Phenotype_class = 1 if ANY antibiotic in class == 1, else 0"
+GENO_DEF  <- "Genotype_class  = 1 if ANY gene in class rule present == 1, else 0"
+
+# -----------------------------
+# 1) Class rulebook (EDIT HERE)
+# -----------------------------
+# Use EXACT column names from your input.
+class_rules <- list(
+  FQ_Quinolones = list(
+    antibiotics = c("Ciprofloxacin","Levofloxacin","NalidixicAcid"),
+    genes = c("gyrA_S83Y","gyrA_S83F","gyrA_D87G","gyrA_D87N","gyrA_D87Y","parC_S80I","qnrS13","qnrB19")
+  ),
+  ESBL_Cephalosporins = list(
+    antibiotics = c("Cefotaxime","Ceftriaxone","Ceftazidime","Cefepime","Ceftiofur"),
+    genes = c("blaCTX-M-8","blaCTX-M-65","blaSHV-12")
+  ),
+  Tetracyclines = list(
+    antibiotics = c("Tetracycline","Doxycycline","Minocycline"),
+    genes = c("tet(A)","tet(B)","tet(G)")
+  ),
+  SXT_SulfaTrim = list(
+    antibiotics = c("Sulfamethoxazole","Sulfizoxazole","Trimethoprim_Sulfamethoxazole","Trimethoprim"),
+    genes = c("sul1","sul2","sul3","dfrA5","dfrA14","dfrA17")
+  ),
+  Phenicols = list(
+    antibiotics = c("Chloramphenicol"),
+    genes = c("floR","cmlA1")
+  ),
+  Aminoglycosides = list(
+    antibiotics = c("Streptomycin","Gentamicin","Tobramycin","Amikacin"),
+    genes = c("aadA1","aadA2","aadA5","aadA22","aac(3)-IId","aac(3)-IVa","aph(6)-Id","aph(3'')-Ib","aph(3')-Ia","aph(4)-Ia")
+  ),
+  Penicillins = list(
+    antibiotics = c("Ampicillin"),
+    genes = c("blaTEM","blaTEM-1","blaCARB-2")
+  )
+)
+
+# -----------------------------
+# 2) Helpers
+# -----------------------------
+stop_if_missing <- function(path) {
+  if (!file.exists(path)) stop("Input file not found: ", path)
+}
+
+read_input <- function(path) {
+  ext <- tolower(file_ext(path))
+  if (ext == "csv") {
+    df <- readr::read_csv(path, show_col_types = FALSE) |> as.data.frame()
+  } else if (ext %in% c("xlsx","xls")) {
+    if (!requireNamespace("readxl", quietly = TRUE)) install.packages("readxl")
+    df <- readxl::read_excel(path) |> as.data.frame()
+  } else {
+    stop("Unsupported file type: ", ext, " (use CSV or Excel)")
+  }
+  names(df) <- trimws(names(df))
+  df
+}
+
+any1 <- function(x) {
+  # x expected to be numeric 0/1
+  if (all(is.na(x))) return(NA_integer_)
+  as.integer(any(x == 1, na.rm = TRUE))
+}
+
+as01 <- function(x) {
+  # robust conversion to integer 0/1/NA
+  if (is.logical(x)) return(as.integer(x))
+  suppressWarnings({
+    y <- as.integer(as.character(x))
+  })
+  y
+}
+
+# Compute Cohen's kappa for two binary vectors (0/1), excluding NA
+kappa_binary <- function(y_true, y_pred) {
+  ok <- complete.cases(y_true, y_pred)
+  y_true <- y_true[ok]; y_pred <- y_pred[ok]
+  if (length(y_true) == 0) return(NA_real_)
+
+  tab <- table(factor(y_true, levels=c(0,1)),
+               factor(y_pred, levels=c(0,1)))
+
+  n <- sum(tab)
+  if (n == 0) return(NA_real_)
+
+  po <- (tab[1,1] + tab[2,2]) / n
+  pe <- ((sum(tab[1,]) / n) * (sum(tab[,1]) / n)) +
+        ((sum(tab[2,]) / n) * (sum(tab[,2]) / n))
+
+  if (isTRUE(all.equal(1 - pe, 0))) return(NA_real_)
+  (po - pe) / (1 - pe)
+}
+
+calc_metrics <- function(y_true, y_pred){
+  y_true <- as.integer(y_true); y_pred <- as.integer(y_pred)
+  ok <- complete.cases(y_true, y_pred)
+  y_true <- y_true[ok]; y_pred <- y_pred[ok]
+
+  TP <- sum(y_true==1 & y_pred==1)
+  FP <- sum(y_true==0 & y_pred==1)
+  TN <- sum(y_true==0 & y_pred==0)
+  FN <- sum(y_true==1 & y_pred==0)
+  n  <- TP + FP + TN + FN
+
+  Sens <- ifelse((TP+FN)==0, NA_real_, TP/(TP+FN))
+  Spec <- ifelse((TN+FP)==0, NA_real_, TN/(TN+FP))
+  PPV  <- ifelse((TP+FP)==0, NA_real_, TP/(TP+FP))
+  NPV  <- ifelse((TN+FN)==0, NA_real_, TN/(TN+FN))
+  Acc  <- ifelse(n==0, NA_real_, (TP+TN)/n)
+
+  Kap <- kappa_binary(y_true, y_pred)
+  Phi <- suppressWarnings(cor(y_true, y_pred, method="pearson"))
+
+  data.frame(
+    TP=TP, FP=FP, TN=TN, FN=FN, n=n,
+    Sensitivity=Sens, Specificity=Spec,
+    PPV=PPV, NPV=NPV,
+    Accuracy=Acc,
+    Kappa=Kap,
+    Phi=Phi
+  )
+}
+
+make_rulebook_df <- function(rules){
+  do.call(rbind, lapply(names(rules), function(cls){
+    data.frame(
+      Class = cls,
+      Phenotype_definition = "Any antibiotic in class == 1",
+      Genotype_definition  = "Any gene in class rule present == 1",
+      Antibiotics = paste(rules[[cls]]$antibiotics, collapse=", "),
+      Genes = paste(rules[[cls]]$genes, collapse=", "),
+      stringsAsFactors = FALSE
+    )
+  }))
+}
+
+# -----------------------------
+# 3) Run
+# -----------------------------
+stop_if_missing(INPUT_FILE)
+
+run_id <- format(Sys.time(), "%Y%m%d_%H%M%S")
+out_dir <- file.path(OUT_PARENT, paste0("Run_", run_id))
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+df <- read_input(INPUT_FILE)
+
+if (!ID_COL %in% names(df)) {
+  stop("ID column not found: '", ID_COL, "'. Available columns include: ",
+       paste(head(names(df), 20), collapse=", "), " ...")
+}
+
+df <- df |> rename(isolate_id = all_of(ID_COL))
+
+# Save rulebook
+rulebook_df <- make_rulebook_df(class_rules)
+write.csv(rulebook_df, file.path(out_dir, "rulebook.csv"), row.names = FALSE)
+
+# Log file
+log_path <- file.path(out_dir, "run_log.txt")
+sink(log_path)
+cat("Run ID:", run_id, "\n")
+cat("Input file:", INPUT_FILE, "\n")
+cat("Rows:", nrow(df), "Columns:", ncol(df), "\n")
+cat("Phenotype definition:", PHENO_DEF, "\n")
+cat("Genotype definition :", GENO_DEF, "\n\n")
+sink()
+
+results_list <- list()
+
+for (cls in names(class_rules)) {
+
+  ab <- class_rules[[cls]]$antibiotics
+  genes <- class_rules[[cls]]$genes
+
+  ab_present <- intersect(ab, names(df))
+  genes_present <- intersect(genes, names(df))
+
+  # If phenotype columns missing, skip with note
+  if (length(ab_present) == 0) {
+    results_list[[cls]] <- data.frame(
+      Class=cls, note="No phenotype columns found for this class",
+      stringsAsFactors = FALSE
+    )
+    next
+  }
+
+  # Build per-isolate calls
+  tmp <- df |>
+    select(isolate_id, all_of(ab_present), all_of(genes_present)) |>
+    mutate(across(-isolate_id, as01)) |>
+    rowwise() |>
+    mutate(
+      pheno_class = any1(c_across(all_of(ab_present))),
+      geno_class  = if (length(genes_present)==0) 0L else any1(c_across(all_of(genes_present)))
+    ) |>
+    ungroup() |>
+    filter(!is.na(pheno_class)) |>
+    select(isolate_id, pheno_class, geno_class)
+
+  # Save per-isolate calls (audit)
+  write.csv(tmp, file.path(out_dir, paste0(cls, "_per_isolate_calls.csv")), row.names = FALSE)
+
+  # Confusion 2x2
+  tab <- table(
+    Phenotype = factor(tmp$pheno_class, levels=c(0,1)),
+    Genotype  = factor(tmp$geno_class,  levels=c(0,1))
+  )
+  write.csv(as.data.frame.matrix(tab), file.path(out_dir, paste0(cls, "_confusion_2x2.csv")))
+
+  # Metrics
+  met <- calc_metrics(tmp$pheno_class, tmp$geno_class)
+
+  results_list[[cls]] <- cbind(
+    data.frame(
+      Class = cls,
+      Antibiotics_used = paste(ab_present, collapse=", "),
+      Genes_used = paste(genes_present, collapse=", "),
+      stringsAsFactors = FALSE
+    ),
+    met
+  )
+}
+
+final <- bind_rows(results_list)
+
+# Save summary
+write.csv(final, file.path(out_dir, "class_metrics.csv"), row.names = FALSE)
+
+# Append session info to log
+sink(log_path, append = TRUE)
+cat("\nR sessionInfo():\n")
+print(sessionInfo())
+sink()
+
+message("DONE ✅  Outputs saved to: ", out_dir)
+print(final)
