@@ -10,7 +10,7 @@
 #   - *_per_isolate_calls.csv
 #   - rulebook.csv
 #   - run_log.txt
-#   - MIC_WGS_FULL_REPORT_<run_id>.xlsx (multi-sheet Excel report)
+#   - MIC_WGS_FULL_REPORT_<run_id>.xlsx (multi-sheet Excel with formulas + guide)
 # ============================================================
 
 suppressPackageStartupMessages({
@@ -58,7 +58,8 @@ class_rules <- list(
     genes = c("tet(A)","tet(B)","tet(G)")
   ),
   SXT_SulfaTrim = list(
-    antibiotics = c("Sulfamethoxazole","Sulfizoxazole","Trimethoprim_Sulfamethoxazole","Trimethoprim"),
+    antibiotics = c("Sulfamethoxazole","Sulfizoxazole",
+                    "Trimethoprim_Sulfamethoxazole","Trimethoprim"),
     genes = c("sul1","sul2","sul3","dfrA5","dfrA14","dfrA17")
   ),
   Phenicols = list(
@@ -67,7 +68,8 @@ class_rules <- list(
   ),
   Aminoglycosides = list(
     antibiotics = c("Streptomycin","Gentamicin","Tobramycin","Amikacin"),
-    genes = c("aadA1","aadA2","aadA5","aadA22","aac(3)-IId","aac(3)-IVa",
+    genes = c("aadA1","aadA2","aadA5","aadA22",
+              "aac(3)-IId","aac(3)-IVa",
               "aph(6)-Id","aph(3'')-Ib","aph(3')-Ia","aph(4)-Ia")
   ),
   Penicillins = list(
@@ -98,13 +100,11 @@ read_input <- function(path) {
 }
 
 any1 <- function(x) {
-  # x expected to be numeric 0/1
   if (all(is.na(x))) return(NA_integer_)
   as.integer(any(x == 1, na.rm = TRUE))
 }
 
 as01 <- function(x) {
-  # robust conversion to integer 0/1/NA
   if (is.logical(x)) return(as.integer(x))
   suppressWarnings({
     y <- as.integer(as.character(x))
@@ -112,7 +112,7 @@ as01 <- function(x) {
   y
 }
 
-# Compute Cohen's kappa for two binary vectors (0/1), excluding NA
+# Compute Cohen's kappa (for CSV output and console only)
 kappa_binary <- function(y_true, y_pred) {
   ok <- complete.cases(y_true, y_pred)
   y_true <- y_true[ok]; y_pred <- y_pred[ok]
@@ -120,7 +120,6 @@ kappa_binary <- function(y_true, y_pred) {
 
   tab <- table(factor(y_true, levels=c(0,1)),
                factor(y_pred, levels=c(0,1)))
-
   n <- sum(tab)
   if (n == 0) return(NA_real_)
 
@@ -181,7 +180,7 @@ make_rulebook_df <- function(rules){
 stop_if_missing(INPUT_FILE)
 
 run_id <- format(Sys.time(), "%Y%m%d_%H%M%S")
-out_dir <- file.path(OUT_PARENT, paste0("Run_", run_id))
+out_dir <- file.path(path.expand(OUT_PARENT), paste0("Run_", run_id))
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 df <- read_input(INPUT_FILE)
@@ -192,7 +191,7 @@ if (!ID_COL %in% names(df)) {
 }
 
 df <- df |>
-  rename(isolate_id = all_of(ID_COL))
+  dplyr::rename(isolate_id = dplyr::all_of(ID_COL))
 
 # Save rulebook
 rulebook_df <- make_rulebook_df(class_rules)
@@ -220,7 +219,6 @@ for (cls in names(class_rules)) {
   ab_present    <- intersect(ab, names(df))
   genes_present <- intersect(genes, names(df))
 
-  # If phenotype columns missing, skip with note
   if (length(ab_present) == 0) {
     results_list[[cls]] <- data.frame(
       Class=cls, note="No phenotype columns found for this class",
@@ -229,20 +227,19 @@ for (cls in names(class_rules)) {
     next
   }
 
-  # Build per-isolate calls
   tmp <- df |>
-    select(isolate_id, all_of(ab_present), all_of(genes_present)) |>
-    mutate(across(-isolate_id, as01)) |>
-    rowwise() |>
-    mutate(
-      pheno_class = any1(c_across(all_of(ab_present))),
-      geno_class  = if (length(genes_present)==0) 0L else any1(c_across(all_of(genes_present)))
+    dplyr::select(isolate_id, dplyr::all_of(ab_present), dplyr::all_of(genes_present)) |>
+    dplyr::mutate(dplyr::across(-isolate_id, as01)) |>
+    dplyr::rowwise() |>
+    dplyr::mutate(
+      pheno_class = any1(dplyr::c_across(dplyr::all_of(ab_present))),
+      geno_class  = if (length(genes_present)==0) 0L else any1(dplyr::c_across(dplyr::all_of(genes_present)))
     ) |>
-    ungroup() |>
-    filter(!is.na(pheno_class)) |>
-    select(isolate_id, pheno_class, geno_class)
+    dplyr::ungroup() |>
+    dplyr::filter(!is.na(pheno_class)) |>
+    dplyr::select(isolate_id, pheno_class, geno_class)
 
-  # Save per-isolate calls (audit)
+  # Save per-isolate calls
   write.csv(tmp,
             file.path(out_dir, paste0(cls, "_per_isolate_calls.csv")),
             row.names = FALSE)
@@ -262,7 +259,7 @@ for (cls in names(class_rules)) {
   calls_list[[cls]]     <- tmp
   confusion_list[[cls]] <- tab_df
 
-  # Metrics
+  # Metrics for CSV & console
   met <- calc_metrics(tmp$pheno_class, tmp$geno_class)
 
   results_list[[cls]] <- cbind(
@@ -276,9 +273,9 @@ for (cls in names(class_rules)) {
   )
 }
 
-final <- bind_rows(results_list)
+final <- dplyr::bind_rows(results_list)
 
-# Save summary
+# Save summary CSV
 write.csv(final, file.path(out_dir, "class_metrics.csv"), row.names = FALSE)
 
 # Append session info to log
@@ -288,27 +285,248 @@ print(sessionInfo())
 sink()
 
 # ------------------------------------------------
-# 4) Create FULL Excel report with multiple sheets
+# 4) Create FULL Excel report with formulas + guide
 # ------------------------------------------------
 wb <- openxlsx::createWorkbook()
 
-# Sheet 1: Class metrics
+# Styles
+headerStyle <- openxlsx::createStyle(
+  fgFill = "#305496", halign = "center", valign = "center",
+  textDecoration = "bold", fontColour = "white"
+)
+bestFillStyle <- openxlsx::createStyle(fgFill = "#FFF2CC")
+borderStyle <- openxlsx::createStyle(border = "TopBottomLeftRight", borderColour = "black")
+percentStyle <- openxlsx::createStyle(numFmt = "0.0%")
+
+# ---- Sheet 1: Class_Metrics (with formulas) ----
 openxlsx::addWorksheet(wb, "Class_Metrics")
-openxlsx::writeData(wb, "Class_Metrics", final)
 
-# Sheet 2: Rulebook
-openxlsx::addWorksheet(wb, "Rulebook")
-openxlsx::writeData(wb, "Rulebook", rulebook_df)
+headers <- c("Class","TP","FP","TN","FN","n",
+             "Sensitivity","Specificity","PPV","NPV","Accuracy","Kappa","Phi")
 
-# Sheets for each class: 2x2_* and Calls_*
+openxlsx::writeData(wb, "Class_Metrics", t(as.data.frame(headers)),
+                    startRow = 1, startCol = 1, colNames = FALSE)
+openxlsx::addStyle(wb, "Class_Metrics", style = headerStyle,
+                   rows = 1, cols = 1:length(headers), gridExpand = TRUE)
+
+# extract TP/FP/TN/FN for each class from final
+metric_rows <- final[, c("Class","TP","FP","TN","FN")]
+
+for (i in seq_len(nrow(metric_rows))) {
+  row_idx <- i + 2  # start at row 2; leave row 1 for header, row 2 for first class if needed
+  cls  <- metric_rows$Class[i]
+  TP   <- metric_rows$TP[i]
+  FP   <- metric_rows$FP[i]
+  TN   <- metric_rows$TN[i]
+  FN   <- metric_rows$FN[i]
+
+  # Class, TP, FP, TN, FN
+  openxlsx::writeData(wb, "Class_Metrics", x = cls,
+                      startRow = row_idx, startCol = 1, colNames = FALSE)
+  openxlsx::writeData(wb, "Class_Metrics", x = TP,
+                      startRow = row_idx, startCol = 2, colNames = FALSE)
+  openxlsx::writeData(wb, "Class_Metrics", x = FP,
+                      startRow = row_idx, startCol = 3, colNames = FALSE)
+  openxlsx::writeData(wb, "Class_Metrics", x = TN,
+                      startRow = row_idx, startCol = 4, colNames = FALSE)
+  openxlsx::writeData(wb, "Class_Metrics", x = FN,
+                      startRow = row_idx, startCol = 5, colNames = FALSE)
+
+  # n = B + C + D + E
+  openxlsx::writeFormula(
+    wb, "Class_Metrics",
+    x = sprintf("=B%d+C%d+D%d+E%d", row_idx, row_idx, row_idx, row_idx),
+    startRow = row_idx, startCol = 6
+  )
+
+  # Sensitivity = TP/(TP+FN)
+  openxlsx::writeFormula(
+    wb, "Class_Metrics",
+    x = sprintf("=IF((B%d+E%d)=0,\"\",B%d/(B%d+E%d))", row_idx, row_idx, row_idx, row_idx, row_idx),
+    startRow = row_idx, startCol = 7
+  )
+
+  # Specificity = TN/(TN+FP)
+  openxlsx::writeFormula(
+    wb, "Class_Metrics",
+    x = sprintf("=IF((C%d+D%d)=0,\"\",D%d/(C%d+D%d))", row_idx, row_idx, row_idx, row_idx, row_idx),
+    startRow = row_idx, startCol = 8
+  )
+
+  # PPV = TP/(TP+FP)
+  openxlsx::writeFormula(
+    wb, "Class_Metrics",
+    x = sprintf("=IF((B%d+C%d)=0,\"\",B%d/(B%d+C%d))", row_idx, row_idx, row_idx, row_idx, row_idx),
+    startRow = row_idx, startCol = 9
+  )
+
+  # NPV = TN/(TN+FN)
+  openxlsx::writeFormula(
+    wb, "Class_Metrics",
+    x = sprintf("=IF((D%d+E%d)=0,\"\",D%d/(D%d+E%d))", row_idx, row_idx, row_idx, row_idx, row_idx),
+    startRow = row_idx, startCol = 10
+  )
+
+  # Accuracy = (TP+TN)/n
+  openxlsx::writeFormula(
+    wb, "Class_Metrics",
+    x = sprintf("=IF(F%d=0,\"\",(B%d+D%d)/F%d)", row_idx, row_idx, row_idx, row_idx),
+    startRow = row_idx, startCol = 11
+  )
+
+  # Kappa = (Po - Pe)/(1 - Pe), with checks
+  den_str <- sprintf(
+    "(((B%d+C%d)/F%d)*((B%d+E%d)/F%d)+((E%d+D%d)/F%d)*((C%d+D%d)/F%d))",
+    row_idx,row_idx,row_idx,
+    row_idx,row_idx,row_idx,
+    row_idx,row_idx,row_idx,
+    row_idx,row_idx,row_idx
+  )
+  po_str <- sprintf("(B%d+D%d)/F%d", row_idx, row_idx, row_idx)
+  kap_formula <- sprintf(
+    "=IF(F%d=0,\"\",IF(1-%s=0,\"\",(%s-%s)/(1-%s)))",
+    row_idx, den_str, po_str, den_str, den_str
+  )
+  openxlsx::writeFormula(
+    wb, "Class_Metrics",
+    x = kap_formula,
+    startRow = row_idx, startCol = 12
+  )
+
+  # Phi
+  numer_str <- sprintf("(B%d*D%d-C%d*E%d)", row_idx,row_idx,row_idx,row_idx)
+  den_phi_str <- sprintf(
+    "SQRT((B%d+C%d)*(B%d+E%d)*(D%d+C%d)*(D%d+E%d))",
+    row_idx,row_idx,
+    row_idx,row_idx,
+    row_idx,row_idx,
+    row_idx,row_idx
+  )
+  phi_formula <- sprintf(
+    "=IF(OR((B%d+C%d)=0,(B%d+E%d)=0,(D%d+C%d)=0,(D%d+E%d)=0),\"\",%s/%s)",
+    row_idx,row_idx,row_idx,row_idx,row_idx,row_idx,row_idx,row_idx,
+    numer_str, den_phi_str
+  )
+  openxlsx::writeFormula(
+    wb, "Class_Metrics",
+    x = phi_formula,
+    startRow = row_idx, startCol = 13
+  )
+
+  # Highlight best class (Tetracyclines)
+  if (identical(cls, "Tetracyclines")) {
+    openxlsx::addStyle(
+      wb, "Class_Metrics", style = bestFillStyle,
+      rows = row_idx, cols = 1:length(headers), gridExpand = TRUE, stack = TRUE
+    )
+  }
+
+  # Borders
+  openxlsx::addStyle(
+    wb, "Class_Metrics", style = borderStyle,
+    rows = row_idx, cols = 1:length(headers), gridExpand = TRUE, stack = TRUE
+  )
+}
+
+# Column widths and percentage formats
+for (col in 1:length(headers)) {
+  openxlsx::setColWidths(wb, "Class_Metrics", cols = col, widths = 14)
+}
+n_rows <- nrow(metric_rows)
+openxlsx::addStyle(
+  wb, "Class_Metrics", style = percentStyle,
+  rows = 3:(n_rows+2), cols = 7:11, gridExpand = TRUE, stack = TRUE
+)
+
+# ---- Sheet 2: Interpretation_Guide ----
+openxlsx::addWorksheet(wb, "Interpretation_Guide")
+
+guide_lines <- list(
+  c("Purpose", "This sheet helps users interpret genotype–phenotype agreement results at the antimicrobial class level."),
+  c("", ""),
+  c("Key concepts", ""),
+  c("TP (True Positive)", "Phenotype = resistant (1) AND genotype = gene present (1)."),
+  c("FP (False Positive)", "Phenotype = susceptible (0) AND genotype = gene present (1)."),
+  c("TN (True Negative)", "Phenotype = susceptible (0) AND genotype = gene absent (0)."),
+  c("FN (False Negative)", "Phenotype = resistant (1) AND genotype = gene absent (0)."),
+  c("", ""),
+  c("Sensitivity", "Probability that a resistant isolate carries the resistance determinant(s). Low sensitivity suggests missing mechanisms (e.g., alternative genes, efflux, porins)."),
+  c("Specificity", "Probability that a susceptible isolate lacks the resistance determinant(s). Low specificity indicates over-calling resistance by WGS (genes without phenotypic expression)."),
+  c("PPV", "Proportion of gene-positive isolates that are phenotypically resistant. Depends strongly on resistance prevalence."),
+  c("NPV", "Proportion of gene-negative isolates that are phenotypically susceptible. Often high when resistance is rare."),
+  c("Accuracy", "Overall proportion of correctly classified isolates. Can be misleading when one outcome (e.g., susceptible) dominates."),
+  c("", ""),
+  c("Kappa (κ)", "Chance-corrected agreement between genotype and phenotype. Values: <0.20 poor, 0.21–0.40 fair, 0.41–0.60 moderate, 0.61–0.80 substantial, >0.80 almost perfect."),
+  c("Phi coefficient (Φ)", "Pearson correlation for binary data (−1 to +1). Values near 0 indicate little association; higher absolute values show stronger correlation."),
+  c("", ""),
+  c("How to read the table", ""),
+  c("1", "Always check the number of resistant isolates first. Classes with very few resistant isolates cannot be interpreted reliably (Kappa and Sensitivity unstable)."),
+  c("2", "Interpret Sensitivity and Specificity together. High Sensitivity + low Specificity usually means WGS over-calls resistance; the opposite suggests missing resistance mechanisms."),
+  c("3", "Use Kappa and Phi to summarise agreement, but interpret them in context of event frequency and biological plausibility."),
+  c("4", "Do not rely on Accuracy alone when resistance is rare, because high Accuracy may simply reflect the majority of susceptible isolates."),
+  c("5", "Document any known biological explanations for disagreement (e.g., efflux pumps, AmpC, porin changes, non-expressed genes).")
+)
+
+interp_df <- do.call(rbind, lapply(guide_lines, function(x){
+  data.frame(Col1 = x[1], Col2 = x[2], stringsAsFactors = FALSE)
+}))
+openxlsx::writeData(wb, "Interpretation_Guide", interp_df,
+                    startRow = 1, startCol = 1, colNames = FALSE)
+openxlsx::setColWidths(wb, "Interpretation_Guide", cols = 1, widths = 25)
+openxlsx::setColWidths(wb, "Interpretation_Guide", cols = 2, widths = 110)
+openxlsx::addStyle(
+  wb, "Interpretation_Guide",
+  style = openxlsx::createStyle(wrapText = TRUE, valign = "top"),
+  rows = 1:nrow(interp_df), cols = 1:2, gridExpand = TRUE
+)
+
+# ---- Sheet 3: Calculation_Methods ----
+openxlsx::addWorksheet(wb, "Calculation_Methods")
+
+calc_lines <- list(
+  c("Metric", "Definition", "Formula (using TP, FP, TN, FN)"),
+  c("Sensitivity", "Ability of the genotype to detect phenotypically resistant isolates", "Sensitivity = TP / (TP + FN)"),
+  c("Specificity", "Ability of the genotype to correctly identify susceptible isolates", "Specificity = TN / (TN + FP)"),
+  c("PPV", "Probability that gene-positive isolates are resistant", "PPV = TP / (TP + FP)"),
+  c("NPV", "Probability that gene-negative isolates are susceptible", "NPV = TN / (TN + FN)"),
+  c("Accuracy", "Overall proportion of correctly classified isolates", "Accuracy = (TP + TN) / (TP + FP + TN + FN)"),
+  c("", "", ""),
+  c("Cohen's Kappa (κ)", "Chance-corrected agreement between phenotype and genotype", "κ = (Po − Pe) / (1 − Pe)"),
+  c("Po (observed agreement)", "", "Po = (TP + TN) / n"),
+  c("Pe (expected agreement by chance)", "", "Pe = [(TP+FP)/n × (TP+FN)/n] + [(FN+TN)/n × (FP+TN)/n]"),
+  c("", "", ""),
+  c("Phi coefficient (Φ)", "Correlation between two binary variables", "Φ = (TP×TN − FP×FN) / sqrt[(TP+FP)(TP+FN)(TN+FP)(TN+FN)]"),
+  c("", "", ""),
+  c("Implementation note", "All metrics in this workbook are calculated from the class-level confusion matrix, which is derived from per-isolate calls generated by the R script (phenotype_class vs genotype_class).", "")
+)
+
+calc_df <- do.call(rbind, lapply(calc_lines, function(x){
+  data.frame(Col1=x[1], Col2=x[2], Col3=x[3], stringsAsFactors = FALSE)
+}))
+openxlsx::writeData(wb, "Calculation_Methods", calc_df,
+                    startRow = 1, startCol = 1, colNames = FALSE)
+openxlsx::setColWidths(wb, "Calculation_Methods", cols = 1, widths = 25)
+openxlsx::setColWidths(wb, "Calculation_Methods", cols = 2, widths = 70)
+openxlsx::setColWidths(wb, "Calculation_Methods", cols = 3, widths = 70)
+openxlsx::addStyle(
+  wb, "Calculation_Methods",
+  style = openxlsx::createStyle(wrapText = TRUE, valign = "top"),
+  rows = 1:nrow(calc_df), cols = 1:3, gridExpand = TRUE
+)
+openxlsx::addStyle(
+  wb, "Calculation_Methods",
+  style = headerStyle,
+  rows = 1, cols = 1:3, gridExpand = TRUE, stack = TRUE
+)
+
+# ---- Sheets per class: 2x2_* and Calls_* ----
 for (cls in names(class_rules)) {
-  # 2x2 sheet
   if (!is.null(confusion_list[[cls]])) {
     sheet_name_2x2 <- paste0("2x2_", cls)
     openxlsx::addWorksheet(wb, sheet_name_2x2)
-    openxlsx::writeData(wb, sheet_name_2x2, confusion_list[[cls]], rowNames = TRUE)
+    openxlsx::writeData(wb, sheet_name_2x2, confusion_list[[cls]],
+                        rowNames = TRUE)
   }
-  # Calls sheet
   if (!is.null(calls_list[[cls]])) {
     sheet_name_calls <- paste0("Calls_", cls)
     openxlsx::addWorksheet(wb, sheet_name_calls)
