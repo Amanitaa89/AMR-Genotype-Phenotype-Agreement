@@ -4,23 +4,31 @@
 # Author: (Your Name / Lab)
 # Purpose: Generate class-level genotype–phenotype agreement metrics
 # Inputs: CSV or Excel (one row per isolate; 0/1 phenotype + 0/1 genotype)
-# Outputs: auditable run folder with metrics, rulebook, confusion matrices
+# Outputs:
+#   - class_metrics.csv
+#   - *_confusion_2x2.csv
+#   - *_per_isolate_calls.csv
+#   - rulebook.csv
+#   - run_log.txt
+#   - MIC_WGS_FULL_REPORT_<run_id>.xlsx (multi-sheet Excel report)
 # ============================================================
 
 suppressPackageStartupMessages({
   if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
   if (!requireNamespace("readr", quietly = TRUE)) install.packages("readr")
   if (!requireNamespace("tools", quietly = TRUE)) install.packages("tools")
+  if (!requireNamespace("openxlsx", quietly = TRUE)) install.packages("openxlsx")
   library(dplyr)
   library(readr)
   library(tools)
+  library(openxlsx)
 })
 
 # -----------------------------
 # 0) User settings (EDIT HERE)
 # -----------------------------
-# Input file path (CSV recommended)
-INPUT_FILE <- "~/Documents/Book10CorrelationE.csv"
+# Input file path (CSV or Excel)
+INPUT_FILE <- "/Users/aat/Documents/Enteritidis/New_MIC_WGS_Data.csv"
 
 # ID column name in input file
 ID_COL <- "LIMS ID"
@@ -59,7 +67,8 @@ class_rules <- list(
   ),
   Aminoglycosides = list(
     antibiotics = c("Streptomycin","Gentamicin","Tobramycin","Amikacin"),
-    genes = c("aadA1","aadA2","aadA5","aadA22","aac(3)-IId","aac(3)-IVa","aph(6)-Id","aph(3'')-Ib","aph(3')-Ia","aph(4)-Ia")
+    genes = c("aadA1","aadA2","aadA5","aadA22","aac(3)-IId","aac(3)-IVa",
+              "aph(6)-Id","aph(3'')-Ib","aph(3')-Ia","aph(4)-Ia")
   ),
   Penicillins = list(
     antibiotics = c("Ampicillin"),
@@ -68,7 +77,7 @@ class_rules <- list(
 )
 
 # -----------------------------
-# 2) Helpers
+# 2) Helper functions
 # -----------------------------
 stop_if_missing <- function(path) {
   if (!file.exists(path)) stop("Input file not found: ", path)
@@ -182,7 +191,8 @@ if (!ID_COL %in% names(df)) {
        paste(head(names(df), 20), collapse=", "), " ...")
 }
 
-df <- df |> rename(isolate_id = all_of(ID_COL))
+df <- df |>
+  rename(isolate_id = all_of(ID_COL))
 
 # Save rulebook
 rulebook_df <- make_rulebook_df(class_rules)
@@ -198,14 +208,16 @@ cat("Phenotype definition:", PHENO_DEF, "\n")
 cat("Genotype definition :", GENO_DEF, "\n\n")
 sink()
 
-results_list <- list()
+results_list   <- list()
+confusion_list <- list()
+calls_list     <- list()
 
 for (cls in names(class_rules)) {
 
-  ab <- class_rules[[cls]]$antibiotics
+  ab    <- class_rules[[cls]]$antibiotics
   genes <- class_rules[[cls]]$genes
 
-  ab_present <- intersect(ab, names(df))
+  ab_present    <- intersect(ab, names(df))
   genes_present <- intersect(genes, names(df))
 
   # If phenotype columns missing, skip with note
@@ -231,14 +243,24 @@ for (cls in names(class_rules)) {
     select(isolate_id, pheno_class, geno_class)
 
   # Save per-isolate calls (audit)
-  write.csv(tmp, file.path(out_dir, paste0(cls, "_per_isolate_calls.csv")), row.names = FALSE)
+  write.csv(tmp,
+            file.path(out_dir, paste0(cls, "_per_isolate_calls.csv")),
+            row.names = FALSE)
 
   # Confusion 2x2
   tab <- table(
     Phenotype = factor(tmp$pheno_class, levels=c(0,1)),
     Genotype  = factor(tmp$geno_class,  levels=c(0,1))
   )
-  write.csv(as.data.frame.matrix(tab), file.path(out_dir, paste0(cls, "_confusion_2x2.csv")))
+  tab_df <- as.data.frame.matrix(tab)
+
+  write.csv(tab_df,
+            file.path(out_dir, paste0(cls, "_confusion_2x2.csv")),
+            row.names = TRUE)
+
+  # Store for Excel full report
+  calls_list[[cls]]     <- tmp
+  confusion_list[[cls]] <- tab_df
 
   # Metrics
   met <- calc_metrics(tmp$pheno_class, tmp$geno_class)
@@ -247,7 +269,7 @@ for (cls in names(class_rules)) {
     data.frame(
       Class = cls,
       Antibiotics_used = paste(ab_present, collapse=", "),
-      Genes_used = paste(genes_present, collapse=", "),
+      Genes_used       = paste(genes_present, collapse=", "),
       stringsAsFactors = FALSE
     ),
     met
@@ -265,5 +287,39 @@ cat("\nR sessionInfo():\n")
 print(sessionInfo())
 sink()
 
+# ------------------------------------------------
+# 4) Create FULL Excel report with multiple sheets
+# ------------------------------------------------
+wb <- openxlsx::createWorkbook()
+
+# Sheet 1: Class metrics
+openxlsx::addWorksheet(wb, "Class_Metrics")
+openxlsx::writeData(wb, "Class_Metrics", final)
+
+# Sheet 2: Rulebook
+openxlsx::addWorksheet(wb, "Rulebook")
+openxlsx::writeData(wb, "Rulebook", rulebook_df)
+
+# Sheets for each class: 2x2_* and Calls_*
+for (cls in names(class_rules)) {
+  # 2x2 sheet
+  if (!is.null(confusion_list[[cls]])) {
+    sheet_name_2x2 <- paste0("2x2_", cls)
+    openxlsx::addWorksheet(wb, sheet_name_2x2)
+    openxlsx::writeData(wb, sheet_name_2x2, confusion_list[[cls]], rowNames = TRUE)
+  }
+  # Calls sheet
+  if (!is.null(calls_list[[cls]])) {
+    sheet_name_calls <- paste0("Calls_", cls)
+    openxlsx::addWorksheet(wb, sheet_name_calls)
+    openxlsx::writeData(wb, sheet_name_calls, calls_list[[cls]])
+  }
+}
+
+# Save workbook
+full_report_path <- file.path(out_dir, paste0("MIC_WGS_FULL_REPORT_", run_id, ".xlsx"))
+openxlsx::saveWorkbook(wb, full_report_path, overwrite = TRUE)
+
 message("DONE ✅  Outputs saved to: ", out_dir)
+message("FULL Excel report: ", full_report_path)
 print(final)
